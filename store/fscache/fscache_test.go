@@ -253,6 +253,24 @@ func Test_parseTimeout(t *testing.T) {
 	}
 }
 
+func Test_parseUmask(t *testing.T) {
+	tests := []struct {
+		name string
+		v    string
+		want fs.FileMode
+	}{
+		{"empty", "", 0},
+		{"valid", "022", fs.FileMode(0o022)},
+		{"invalid", "invalid", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseUmask(tt.v)
+			testutil.AssertEqual(t, tt.want, got, "parseUmask(%q)", tt.v)
+		})
+	}
+}
+
 func TestFSCache_SetGet_WithEncryption(t *testing.T) {
 	u, err := url.Parse("fscache://" + filepath.ToSlash(t.TempDir()) +
 		"?appname=testapp&encrypt=aesgcm&encrypt_key=6S-Ks2YYOW0xMvTzKSv6QD30gZeOi1c6Ydr-As5csWk=")
@@ -318,4 +336,30 @@ func Test_fsCache_SetGet_UpdateMTime(t *testing.T) {
 	mtime2 := info2.ModTime()
 
 	testutil.AssertTrue(t, mtime2.After(mtime1))
+}
+
+func Test_fsCache_SetGet_Umask(t *testing.T) {
+	u, err := url.Parse("fscache://" + filepath.ToSlash(t.TempDir()) +
+		"?appname=testapp&umask=077")
+	testutil.RequireNoError(t, err)
+	cache, err := fromURL(u)
+	testutil.RequireNoError(t, err)
+	t.Cleanup(func() { cache.Close() })
+
+	keyName := "mykey"
+	value := []byte("some value")
+
+	err = cache.Set(keyName, value)
+	testutil.RequireNoError(t, err)
+
+	// Check file permissions
+	fname := cache.fn.FileName(keyName)
+	info1, err := fs.Stat(cache.root.FS(), fname)
+	testutil.RequireNoError(t, err)
+	testutil.AssertTrue(t, info1.Mode().Perm()&0o077 == 0)
+
+	// Check parent directory permissions
+	info2, err := fs.Stat(cache.root.FS(), filepath.Dir(fname))
+	testutil.RequireNoError(t, err)
+	testutil.AssertTrue(t, info2.Mode().Perm()&0o077 == 0)
 }

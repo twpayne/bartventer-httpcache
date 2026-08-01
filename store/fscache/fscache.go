@@ -33,6 +33,7 @@
 //   - encrypt (optional): Enable AES-GCM encryption ("on" or "aesgcm")
 //   - encrypt_key (optional): Base64-encoded AES key (URL-safe, RFC 4648 §5)
 //   - update_mtime (optional): Update file mtime on cache hits ("on" to enable)
+//   - umask (optional): Permission mask to apply to created files and directories
 //
 // # Usage Examples
 //
@@ -57,6 +58,11 @@
 //
 //		fscache://?appname=myapp&update_mtime=on
 //		fscache.Open("myapp", fscache.WithUpdateMTime(true))
+//
+//	 Private cache files and directories:
+//
+//		fscache://?appname=myapp&umask=077
+//		fscache.Open("myapp", fscache.WithUmask(0o077))
 //
 // # Encryption Key Management
 //
@@ -92,6 +98,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,6 +148,7 @@ type fsCache struct {
 	timeout     time.Duration // optional timeout for operations
 	enc         encryptor     // optional encryptor for data
 	updateMTime bool          // whether to update file mtime on cache hits
+	umask       fs.FileMode   // umask for created files and directories
 
 	// internal dependencies
 
@@ -160,6 +168,17 @@ func parseTimeout(v string) time.Duration {
 		return 0
 	}
 	return max(timeout, 0)
+}
+
+func parseUmask(v string) fs.FileMode {
+	if v == "" {
+		return 0
+	}
+	umask, err := strconv.ParseUint(v, 8, 32)
+	if err == nil {
+		return fs.FileMode(umask)
+	}
+	return 0
 }
 
 var errEncryptionEnabledWithoutKey = errors.New("fscache: encryption enabled but no key provided")
@@ -219,6 +238,14 @@ func WithUpdateMTime(enabled bool) Option {
 	})
 }
 
+// WithUmask sets the permission mask for created files and directories.
+func WithUmask(umask fs.FileMode) Option {
+	return optionFunc(func(c *fsCache) error {
+		c.umask = umask
+		return nil
+	})
+}
+
 func fromURL(u *url.URL) (*fsCache, error) {
 	appname := u.Query().Get("appname")
 	if appname == "" {
@@ -240,6 +267,9 @@ func fromURL(u *url.URL) (*fsCache, error) {
 	}
 	if updateMTime := u.Query().Get("update_mtime"); updateMTime == "on" {
 		opts = append(opts, WithUpdateMTime(true))
+	}
+	if v := u.Query().Get("umask"); v != "" {
+		opts = append(opts, WithUmask(parseUmask(v)))
 	}
 	if cap(opts) > len(opts) {
 		opts = slices.Clip(opts)
@@ -291,7 +321,7 @@ func (c *fsCache) initialize(appname string) error {
 		return ErrMissingAppName
 	}
 	c.base = filepath.Join(c.base, appname)
-	if err := os.MkdirAll(c.base, 0o755); err != nil {
+	if err := os.MkdirAll(c.base, 0o755&^c.umask); err != nil {
 		return errors.Join(ErrCreateCacheDir, err)
 	}
 	var err error
@@ -409,7 +439,7 @@ func (c *fsCache) set(key string, entry []byte) error {
 		}
 	}
 	name := c.fn.FileName(key)
-	if err := c.root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+	if err := c.root.MkdirAll(filepath.Dir(name), 0o755&^c.umask); err != nil {
 		return err
 	}
 	f, err := c.root.Create(name)
@@ -417,6 +447,15 @@ func (c *fsCache) set(key string, entry []byte) error {
 		return err
 	}
 	defer f.Close()
+	if c.umask != 0 {
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if err := f.Chmod(info.Mode().Perm() &^ c.umask); err != nil {
+			return err
+		}
+	}
 	_, err = f.Write(entry)
 	if err != nil {
 		return err
